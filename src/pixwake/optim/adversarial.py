@@ -18,13 +18,12 @@ Example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import NamedTuple
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import value_and_grad
 from jax.lax import while_loop
 
@@ -251,7 +250,9 @@ class GradientAdversarialSearch:
 
             # Liberal layout (optimized in isolation) evaluated WITH neighbors
             # This is differentiable w.r.t. neighbor_params
-            liberal_aep_present = self._compute_aep(liberal_x, liberal_y, neighbor_x, neighbor_y)
+            liberal_aep_present = self._compute_aep(
+                liberal_x, liberal_y, neighbor_x, neighbor_y
+            )
 
             # Optimize target layout given neighbors (differentiable via IFT)
             opt_x, opt_y = sgd_solve_implicit(
@@ -307,10 +308,7 @@ class GradientAdversarialSearch:
 
             grad_norm = float(jnp.linalg.norm(grad))
             if settings.verbose and i % 10 == 0:
-                print(
-                    f"Iter {i}: regret = {regret:.4f} GWh, "
-                    f"|grad| = {grad_norm:.6f}"
-                )
+                print(f"Iter {i}: regret = {regret:.4f} GWh, |grad| = {grad_norm:.6f}")
 
             # Check convergence
             if i > 0 and abs(history[-1][0] - history[-2][0]) < settings.tol:
@@ -321,10 +319,12 @@ class GradientAdversarialSearch:
             # ADAM update (gradient ascent: maximize regret)
             t = i + 1
             m = beta1 * m + (1 - beta1) * grad
-            v = beta2 * v + (1 - beta2) * grad ** 2
-            m_hat = m / (1 - beta1 ** t)
-            v_hat = v / (1 - beta2 ** t)
-            neighbor_params = neighbor_params + settings.learning_rate * m_hat / (jnp.sqrt(v_hat) + adam_eps)
+            v = beta2 * v + (1 - beta2) * grad**2
+            m_hat = m / (1 - beta1**t)
+            v_hat = v / (1 - beta2**t)
+            neighbor_params = neighbor_params + settings.learning_rate * m_hat / (
+                jnp.sqrt(v_hat) + adam_eps
+            )
 
             # Apply neighbor boundary constraints if specified
             if settings.neighbor_boundary is not None:
@@ -380,7 +380,9 @@ class GradientAdversarialSearch:
         )
 
         final_conservative_aep = float(
-            self._compute_aep(final_target_x, final_target_y, final_neighbor_x, final_neighbor_y)
+            self._compute_aep(
+                final_target_x, final_target_y, final_neighbor_x, final_neighbor_y
+            )
         )
         final_liberal_aep_present = float(
             self._compute_aep(liberal_x, liberal_y, final_neighbor_x, final_neighbor_y)
@@ -388,10 +390,12 @@ class GradientAdversarialSearch:
         final_regret = final_conservative_aep - final_liberal_aep_present
 
         if settings.verbose:
-            print(f"\nFinal Results:")
+            print("\nFinal Results:")
             print(f"  Liberal AEP (isolated): {liberal_aep:.2f} GWh")
             print(f"  Liberal AEP (w/ neighbors): {final_liberal_aep_present:.2f} GWh")
-            print(f"  Conservative AEP (w/ neighbors): {final_conservative_aep:.2f} GWh")
+            print(
+                f"  Conservative AEP (w/ neighbors): {final_conservative_aep:.2f} GWh"
+            )
             print(f"  Regret: {final_regret:.4f} GWh")
 
         return AdversarialSearchResult(
@@ -438,12 +442,17 @@ class GradientAdversarialSearch:
                 )
                 opt_x, opt_y = sgd_solve_implicit_multistart(
                     objective_with_neighbors,
-                    init_x_batch, init_y_batch, neighbor_params,
-                    self.target_boundary, self.target_min_spacing, sgd_settings,
+                    init_x_batch,
+                    init_y_batch,
+                    neighbor_params,
+                    self.target_boundary,
+                    self.target_min_spacing,
+                    sgd_settings,
                 )
                 conservative_aep = self._compute_aep(opt_x, opt_y, nb_x, nb_y)
                 return conservative_aep - liberal_aep_present
         else:
+
             def objective_with_neighbors(x, y, neighbor_params):
                 n_nb = neighbor_params.shape[0] // 2
                 nb_x, nb_y = neighbor_params[:n_nb], neighbor_params[n_nb:]
@@ -457,8 +466,11 @@ class GradientAdversarialSearch:
                 )
                 opt_x, opt_y = sgd_solve_implicit(
                     objective_with_neighbors,
-                    init_target_x, init_target_y,
-                    self.target_boundary, self.target_min_spacing, sgd_settings,
+                    init_target_x,
+                    init_target_y,
+                    self.target_boundary,
+                    self.target_min_spacing,
+                    sgd_settings,
                     neighbor_params,
                 )
                 conservative_aep = self._compute_aep(opt_x, opt_y, nb_x, nb_y)
@@ -510,9 +522,9 @@ class GradientAdversarialSearch:
             # ADAM update (gradient ascent: maximize regret)
             t = it + 1
             m_new = beta1 * m + (1 - beta1) * grad
-            v_new = beta2 * v + (1 - beta2) * grad ** 2
-            m_hat = m_new / (1 - beta1 ** t)
-            v_hat = v_new / (1 - beta2 ** t)
+            v_new = beta2 * v + (1 - beta2) * grad**2
+            m_hat = m_new / (1 - beta1**t)
+            v_hat = v_new / (1 - beta2**t)
             params_new = params + learning_rate * m_hat / (jnp.sqrt(v_hat) + adam_eps)
 
             # Boundary clipping if provided
@@ -570,7 +582,6 @@ class GradientAdversarialSearch:
         AdversarialSearchResult
             Best result across all M outer starts.
         """
-        from jax.lax import while_loop as _wl
 
         if settings is None:
             settings = AdversarialSearchSettings()
@@ -584,8 +595,12 @@ class GradientAdversarialSearch:
         from pixwake.optim.sgd import topfarm_sgd_solve
 
         liberal_x, liberal_y = topfarm_sgd_solve(
-            liberal_objective, init_target_x, init_target_y,
-            self.target_boundary, self.target_min_spacing, sgd_settings,
+            liberal_objective,
+            init_target_x,
+            init_target_y,
+            self.target_boundary,
+            self.target_min_spacing,
+            sgd_settings,
         )
         liberal_aep = float(self._compute_aep(liberal_x, liberal_y))
 
@@ -595,7 +610,11 @@ class GradientAdversarialSearch:
         # Build regret function
         use_multistart = inner_k > 1 and inner_init_x_batch is not None
         regret_and_grad_fn = self._build_regret_fn(
-            liberal_x, liberal_y, init_target_x, init_target_y, sgd_settings,
+            liberal_x,
+            liberal_y,
+            init_target_x,
+            init_target_y,
+            sgd_settings,
             use_multistart=use_multistart,
             init_x_batch=inner_init_x_batch,
             init_y_batch=inner_init_y_batch,
@@ -609,14 +628,18 @@ class GradientAdversarialSearch:
             x_max = float(settings.neighbor_boundary[:, 0].max())
             y_min = float(settings.neighbor_boundary[:, 1].min())
             y_max = float(settings.neighbor_boundary[:, 1].max())
-            clip_min = jnp.concatenate([
-                jnp.full(n_neighbors, x_min),
-                jnp.full(n_neighbors, y_min),
-            ])
-            clip_max = jnp.concatenate([
-                jnp.full(n_neighbors, x_max),
-                jnp.full(n_neighbors, y_max),
-            ])
+            clip_min = jnp.concatenate(
+                [
+                    jnp.full(n_neighbors, x_min),
+                    jnp.full(n_neighbors, y_min),
+                ]
+            )
+            clip_max = jnp.concatenate(
+                [
+                    jnp.full(n_neighbors, x_max),
+                    jnp.full(n_neighbors, y_max),
+                ]
+            )
 
         M = init_neighbor_x_batch.shape[0]
 
@@ -631,14 +654,19 @@ class GradientAdversarialSearch:
         all_best_regrets = []
 
         for m_idx in range(M):
-            nb_params = jnp.concatenate([
-                init_neighbor_x_batch[m_idx],
-                init_neighbor_y_batch[m_idx],
-            ])
+            nb_params = jnp.concatenate(
+                [
+                    init_neighbor_x_batch[m_idx],
+                    init_neighbor_y_batch[m_idx],
+                ]
+            )
 
             best_params, best_regret = self._search_single_jax(
-                nb_params, liberal_x, liberal_y,
-                init_target_x, init_target_y,
+                nb_params,
+                liberal_x,
+                liberal_y,
+                init_target_x,
+                init_target_y,
                 regret_and_grad_fn,
                 max_iter=settings.max_iter,
                 learning_rate=settings.learning_rate,
@@ -671,8 +699,11 @@ class GradientAdversarialSearch:
 
         final_target_x, final_target_y = sgd_solve_implicit(
             objective_with_neighbors,
-            init_target_x, init_target_y,
-            self.target_boundary, self.target_min_spacing, sgd_settings,
+            init_target_x,
+            init_target_y,
+            self.target_boundary,
+            self.target_min_spacing,
+            sgd_settings,
             winner_params,
         )
 
@@ -688,12 +719,16 @@ class GradientAdversarialSearch:
             print(f"\nFinal Results (M={M}, K={inner_k}):")
             print(f"  Liberal AEP (isolated): {liberal_aep:.2f} GWh")
             print(f"  Liberal AEP (w/ neighbors): {final_liberal_aep_present:.2f} GWh")
-            print(f"  Conservative AEP (w/ neighbors): {final_conservative_aep:.2f} GWh")
+            print(
+                f"  Conservative AEP (w/ neighbors): {final_conservative_aep:.2f} GWh"
+            )
             print(f"  Regret: {final_regret:.4f} GWh")
 
         # Build history from all starts
-        history = [(r, all_best_params[i][:n_neighbors], all_best_params[i][n_neighbors:])
-                   for i, r in enumerate(all_best_regrets)]
+        history = [
+            (r, all_best_params[i][:n_neighbors], all_best_params[i][n_neighbors:])
+            for i, r in enumerate(all_best_regrets)
+        ]
 
         return AdversarialSearchResult(
             neighbor_x=final_nb_x,
@@ -828,7 +863,11 @@ class BlobAdversarialDiscovery:
     ) -> jnp.ndarray:
         """Compute AEP for target turbines WITHOUT neighbors."""
         result = self.sim(
-            target_x, target_y, ws_amb=self.ws_amb, wd_amb=self.wd_amb, ti_amb=self.ti_amb
+            target_x,
+            target_y,
+            ws_amb=self.ws_amb,
+            wd_amb=self.wd_amb,
+            ti_amb=self.ti_amb,
         )
         power = result.power()
 
@@ -934,10 +973,14 @@ class BlobAdversarialDiscovery:
         aep_L_absent = float(self._compute_aep_absent(liberal_x, liberal_y))
 
         if settings.verbose:
-            print(f"Liberal design AEP (no neighbors): {aep_L_absent:.2f} GWh", flush=True)
+            print(
+                f"Liberal design AEP (no neighbors): {aep_L_absent:.2f} GWh", flush=True
+            )
 
         # Define regret function
-        def compute_regret(control_points: jnp.ndarray, temperature: float) -> tuple[jnp.ndarray, dict]:
+        def compute_regret(
+            control_points: jnp.ndarray, temperature: float
+        ) -> tuple[jnp.ndarray, dict]:
             """Compute liberal regret for given blob configuration.
 
             Returns regret_liberal = AEP_C_present - AEP_L_present
@@ -947,7 +990,9 @@ class BlobAdversarialDiscovery:
             neighbor_mask = spline.contains(self.neighbor_grid, temperature)
 
             # AEP_L_present: Liberal design with neighbors
-            aep_L_present = self._compute_aep_present(liberal_x, liberal_y, neighbor_mask)
+            aep_L_present = self._compute_aep_present(
+                liberal_x, liberal_y, neighbor_mask
+            )
 
             # Compute CONSERVATIVE layout (optimized WITH neighbors)
             # Start from liberal layout for better convergence
@@ -964,22 +1009,28 @@ class BlobAdversarialDiscovery:
             )
 
             # AEP_C_present: Conservative design with neighbors
-            aep_C_present = self._compute_aep_present(conservative_x, conservative_y, neighbor_mask)
+            aep_C_present = self._compute_aep_present(
+                conservative_x, conservative_y, neighbor_mask
+            )
 
             # AEP_C_absent: Conservative design without neighbors
             aep_C_absent = self._compute_aep_absent(conservative_x, conservative_y)
 
             # Regrets
-            regret_liberal = aep_C_present - aep_L_present  # Benefit of conservative when neighbors appear
-            regret_conservative = aep_L_absent - aep_C_absent  # Cost of conservative when neighbors don't appear
+            regret_liberal = (
+                aep_C_present - aep_L_present
+            )  # Benefit of conservative when neighbors appear
+            regret_conservative = (
+                aep_L_absent - aep_C_absent
+            )  # Cost of conservative when neighbors don't appear
 
             details = {
-                'aep_L_present': aep_L_present,
-                'aep_C_present': aep_C_present,
-                'aep_C_absent': aep_C_absent,
-                'conservative_x': conservative_x,
-                'conservative_y': conservative_y,
-                'regret_conservative': regret_conservative,
+                "aep_L_present": aep_L_present,
+                "aep_C_present": aep_C_present,
+                "aep_C_absent": aep_C_absent,
+                "conservative_x": conservative_x,
+                "conservative_y": conservative_y,
+                "regret_conservative": regret_conservative,
             }
 
             return regret_liberal, details
@@ -989,7 +1040,9 @@ class BlobAdversarialDiscovery:
         control_points = init_control_points
         history = []
 
-        def compute_gradient_fd(cp: jnp.ndarray, temp: float, eps: float = 100.0) -> tuple[jnp.ndarray, jnp.ndarray, dict]:
+        def compute_gradient_fd(
+            cp: jnp.ndarray, temp: float, eps: float = 100.0
+        ) -> tuple[jnp.ndarray, jnp.ndarray, dict]:
             """Compute gradient of liberal regret using finite differences."""
             grad = jnp.zeros_like(cp)
             base_regret, base_details = compute_regret(cp, temp)
@@ -1008,9 +1061,8 @@ class BlobAdversarialDiscovery:
         for i in range(settings.max_iter):
             # Anneal temperature
             progress = i / max(settings.max_iter - 1, 1)
-            temperature = (
-                settings.temperature
-                + progress * (settings.temperature_final - settings.temperature)
+            temperature = settings.temperature + progress * (
+                settings.temperature_final - settings.temperature
             )
 
             # Compute regret and gradient using finite differences
@@ -1020,11 +1072,10 @@ class BlobAdversarialDiscovery:
 
             if settings.verbose and (i % 10 == 0 or i < 5):
                 n_effective = float(
-                    BSplineBoundary(control_points).contains(
-                        self.neighbor_grid, temperature
-                    ).sum()
+                    BSplineBoundary(control_points)
+                    .contains(self.neighbor_grid, temperature)
+                    .sum()
                 )
-                step_size = settings.learning_rate * jnp.linalg.norm(grad)
                 print(
                     f"Iter {i}: R_lib = {regret:.4f} GWh, "
                     f"R_con = {details['regret_conservative']:.4f} GWh, "
@@ -1046,31 +1097,47 @@ class BlobAdversarialDiscovery:
         final_temperature = settings.temperature_final
         final_regret, final_details = compute_regret(control_points, final_temperature)
 
-        final_mask = BSplineBoundary(control_points).contains(self.neighbor_grid, final_temperature)
-        aep_L_present = float(final_details['aep_L_present'])
-        aep_C_present = float(final_details['aep_C_present'])
-        aep_C_absent = float(final_details['aep_C_absent'])
+        final_mask = BSplineBoundary(control_points).contains(
+            self.neighbor_grid, final_temperature
+        )
+        aep_L_present = float(final_details["aep_L_present"])
+        aep_C_present = float(final_details["aep_C_present"])
+        aep_C_absent = float(final_details["aep_C_absent"])
         regret_liberal = float(final_regret)
-        regret_conservative = float(final_details['regret_conservative'])
+        regret_conservative = float(final_details["regret_conservative"])
 
         if settings.verbose:
-            print(f"\n{'='*60}", flush=True)
+            print(f"\n{'=' * 60}", flush=True)
             print("Final AEP Matrix:", flush=True)
-            print(f"{'='*60}", flush=True)
-            print(f"                      Neighbors Present | Neighbors Absent", flush=True)
-            print(f"  Liberal Design:     {aep_L_present:>10.2f} GWh | {aep_L_absent:>10.2f} GWh", flush=True)
-            print(f"  Conservative Design:{aep_C_present:>10.2f} GWh | {aep_C_absent:>10.2f} GWh", flush=True)
-            print(f"{'='*60}", flush=True)
-            print(f"Liberal Regret (R_lib = AEP_C_pres - AEP_L_pres): {regret_liberal:.2f} GWh", flush=True)
-            print(f"Conservative Regret (R_con = AEP_L_abs - AEP_C_abs): {regret_conservative:.2f} GWh", flush=True)
+            print(f"{'=' * 60}", flush=True)
+            print(
+                "                      Neighbors Present | Neighbors Absent", flush=True
+            )
+            print(
+                f"  Liberal Design:     {aep_L_present:>10.2f} GWh | {aep_L_absent:>10.2f} GWh",
+                flush=True,
+            )
+            print(
+                f"  Conservative Design:{aep_C_present:>10.2f} GWh | {aep_C_absent:>10.2f} GWh",
+                flush=True,
+            )
+            print(f"{'=' * 60}", flush=True)
+            print(
+                f"Liberal Regret (R_lib = AEP_C_pres - AEP_L_pres): {regret_liberal:.2f} GWh",
+                flush=True,
+            )
+            print(
+                f"Conservative Regret (R_con = AEP_L_abs - AEP_C_abs): {regret_conservative:.2f} GWh",
+                flush=True,
+            )
             print(f"Effective neighbors: {float(final_mask.sum()):.1f}", flush=True)
 
         return BlobDiscoveryResult(
             control_points=control_points,
             liberal_x=liberal_x,
             liberal_y=liberal_y,
-            conservative_x=final_details['conservative_x'],
-            conservative_y=final_details['conservative_y'],
+            conservative_x=final_details["conservative_x"],
+            conservative_y=final_details["conservative_y"],
             aep_L_absent=aep_L_absent,
             aep_L_present=aep_L_present,
             aep_C_absent=aep_C_absent,
@@ -1196,7 +1263,11 @@ class PooledBlobDiscovery:
     ) -> float:
         """Compute AEP for target turbines WITHOUT neighbors."""
         result = self.sim(
-            target_x, target_y, ws_amb=self.ws_amb, wd_amb=self.wd_amb, ti_amb=self.ti_amb
+            target_x,
+            target_y,
+            ws_amb=self.ws_amb,
+            wd_amb=self.wd_amb,
+            ti_amb=self.ti_amb,
         )
         power = result.power()
 
@@ -1253,8 +1324,12 @@ class PooledBlobDiscovery:
 
         margin = self.target_min_spacing / 2
         key1, key2 = jax.random.split(key)
-        x = jax.random.uniform(key1, (n_turbines,), minval=x_min + margin, maxval=x_max - margin)
-        y = jax.random.uniform(key2, (n_turbines,), minval=y_min + margin, maxval=y_max - margin)
+        x = jax.random.uniform(
+            key1, (n_turbines,), minval=x_min + margin, maxval=x_max - margin
+        )
+        y = jax.random.uniform(
+            key2, (n_turbines,), minval=y_min + margin, maxval=y_max - margin
+        )
         return x, y
 
     def discover(
@@ -1301,7 +1376,9 @@ class PooledBlobDiscovery:
         # Define objective functions
         def liberal_objective(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
             """Objective for liberal optimization (no neighbors)."""
-            result = self.sim(x, y, ws_amb=self.ws_amb, wd_amb=self.wd_amb, ti_amb=self.ti_amb)
+            result = self.sim(
+                x, y, ws_amb=self.ws_amb, wd_amb=self.wd_amb, ti_amb=self.ti_amb
+            )
             power = result.power()
             if self.weights is not None:
                 aep = jnp.sum(power * self.weights[:, None]) * 8760 / 1e6
@@ -1317,34 +1394,46 @@ class PooledBlobDiscovery:
             x_all = jnp.concatenate([x, neighbor_x])
             y_all = jnp.concatenate([y, neighbor_y])
 
-            result = self.sim(x_all, y_all, ws_amb=self.ws_amb, wd_amb=self.wd_amb, ti_amb=self.ti_amb)
+            result = self.sim(
+                x_all, y_all, ws_amb=self.ws_amb, wd_amb=self.wd_amb, ti_amb=self.ti_amb
+            )
             power_full = result.power()[:, :n_target]
 
             # AEP with soft-interpolated neighbors
-            result_isolated = self.sim(x, y, ws_amb=self.ws_amb, wd_amb=self.wd_amb, ti_amb=self.ti_amb)
+            result_isolated = self.sim(
+                x, y, ws_amb=self.ws_amb, wd_amb=self.wd_amb, ti_amb=self.ti_amb
+            )
             power_isolated = result_isolated.power()
 
             if self.weights is not None:
                 aep_full = jnp.sum(power_full * self.weights[:, None]) * 8760 / 1e6
-                aep_isolated = jnp.sum(power_isolated * self.weights[:, None]) * 8760 / 1e6
+                aep_isolated = (
+                    jnp.sum(power_isolated * self.weights[:, None]) * 8760 / 1e6
+                )
             else:
                 aep_full = jnp.sum(power_full) * 8760 / 1e6 / power_full.shape[0]
-                aep_isolated = jnp.sum(power_isolated) * 8760 / 1e6 / power_isolated.shape[0]
+                aep_isolated = (
+                    jnp.sum(power_isolated) * 8760 / 1e6 / power_isolated.shape[0]
+                )
 
             n_neighbors = self.neighbor_grid.shape[0]
             effective_fraction = jnp.sum(neighbor_mask) / n_neighbors
-            aep = aep_isolated * (1 - effective_fraction) + aep_full * effective_fraction
+            aep = (
+                aep_isolated * (1 - effective_fraction) + aep_full * effective_fraction
+            )
             return -aep
 
         all_layouts = []
 
         if settings.verbose:
-            print(f"Running pooled multi-start optimization ({settings.n_starts} starts per strategy)")
+            print(
+                f"Running pooled multi-start optimization ({settings.n_starts} starts per strategy)"
+            )
             print(f"  Effective neighbors in blob: {float(neighbor_mask.sum()):.1f}")
 
         # Run liberal optimizations
         if settings.verbose:
-            print(f"\nLiberal optimizations (ignoring neighbors):")
+            print("\nLiberal optimizations (ignoring neighbors):")
         for i in range(settings.n_starts):
             if i == 0:
                 start_x, start_y = init_target_x, init_target_y
@@ -1365,21 +1454,25 @@ class PooledBlobDiscovery:
             aep_absent = self._compute_aep_absent(opt_x, opt_y)
             aep_present = self._compute_aep_present(opt_x, opt_y, neighbor_mask)
 
-            all_layouts.append({
-                'strategy': 'liberal',
-                'start_idx': i,
-                'x': opt_x,
-                'y': opt_y,
-                'aep_absent': aep_absent,
-                'aep_present': aep_present,
-            })
+            all_layouts.append(
+                {
+                    "strategy": "liberal",
+                    "start_idx": i,
+                    "x": opt_x,
+                    "y": opt_y,
+                    "aep_absent": aep_absent,
+                    "aep_present": aep_present,
+                }
+            )
 
             if settings.verbose:
-                print(f"  Start {i}: AEP_absent={aep_absent:.2f}, AEP_present={aep_present:.2f} GWh")
+                print(
+                    f"  Start {i}: AEP_absent={aep_absent:.2f}, AEP_present={aep_present:.2f} GWh"
+                )
 
         # Run conservative optimizations
         if settings.verbose:
-            print(f"\nConservative optimizations (accounting for neighbors):")
+            print("\nConservative optimizations (accounting for neighbors):")
         for i in range(settings.n_starts):
             if i == 0:
                 start_x, start_y = init_target_x, init_target_y
@@ -1400,49 +1493,57 @@ class PooledBlobDiscovery:
             aep_absent = self._compute_aep_absent(opt_x, opt_y)
             aep_present = self._compute_aep_present(opt_x, opt_y, neighbor_mask)
 
-            all_layouts.append({
-                'strategy': 'conservative',
-                'start_idx': i,
-                'x': opt_x,
-                'y': opt_y,
-                'aep_absent': aep_absent,
-                'aep_present': aep_present,
-            })
+            all_layouts.append(
+                {
+                    "strategy": "conservative",
+                    "start_idx": i,
+                    "x": opt_x,
+                    "y": opt_y,
+                    "aep_absent": aep_absent,
+                    "aep_present": aep_present,
+                }
+            )
 
             if settings.verbose:
-                print(f"  Start {i}: AEP_absent={aep_absent:.2f}, AEP_present={aep_present:.2f} GWh")
+                print(
+                    f"  Start {i}: AEP_absent={aep_absent:.2f}, AEP_present={aep_present:.2f} GWh"
+                )
 
         # Compute pooled global bests
-        global_best_aep_absent = max(l['aep_absent'] for l in all_layouts)
-        global_best_aep_present = max(l['aep_present'] for l in all_layouts)
+        global_best_aep_absent = max(lt["aep_absent"] for lt in all_layouts)
+        global_best_aep_present = max(lt["aep_present"] for lt in all_layouts)
 
         # Compute regrets for each layout
         for layout in all_layouts:
             # Liberal regret: how much worse than best when neighbors appear
-            layout['liberal_regret'] = global_best_aep_present - layout['aep_present']
+            layout["liberal_regret"] = global_best_aep_present - layout["aep_present"]
             # Conservative regret: how much worse than best when neighbors absent
-            layout['conservative_regret'] = global_best_aep_absent - layout['aep_absent']
+            layout["conservative_regret"] = (
+                global_best_aep_absent - layout["aep_absent"]
+            )
 
         # Find minimum regrets
-        min_liberal_regret = min(l['liberal_regret'] for l in all_layouts)
-        min_conservative_regret = min(l['conservative_regret'] for l in all_layouts)
+        min_liberal_regret = min(lt["liberal_regret"] for lt in all_layouts)
+        min_conservative_regret = min(lt["conservative_regret"] for lt in all_layouts)
 
         # Find layouts achieving minimum regrets
-        best_liberal_layout = min(all_layouts, key=lambda l: l['liberal_regret'])
-        best_conservative_layout = min(all_layouts, key=lambda l: l['conservative_regret'])
+        best_liberal_layout = min(all_layouts, key=lambda lt: lt["liberal_regret"])
+        best_conservative_layout = min(
+            all_layouts, key=lambda lt: lt["conservative_regret"]
+        )
 
         # Check if same layout achieves both bests
-        best_absent_layout = max(all_layouts, key=lambda l: l['aep_absent'])
-        best_present_layout = max(all_layouts, key=lambda l: l['aep_present'])
+        best_absent_layout = max(all_layouts, key=lambda lt: lt["aep_absent"])
+        best_present_layout = max(all_layouts, key=lambda lt: lt["aep_present"])
         same_best = (
-            best_absent_layout['strategy'] == best_present_layout['strategy'] and
-            best_absent_layout['start_idx'] == best_present_layout['start_idx']
+            best_absent_layout["strategy"] == best_present_layout["strategy"]
+            and best_absent_layout["start_idx"] == best_present_layout["start_idx"]
         )
 
         if settings.verbose:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print("Pooled Results:")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             print(f"Global best AEP (absent):  {global_best_aep_absent:.2f} GWh")
             print(f"Global best AEP (present): {global_best_aep_present:.2f} GWh")
             print(f"Min liberal regret:        {min_liberal_regret:.2f} GWh")
@@ -1455,17 +1556,23 @@ class PooledBlobDiscovery:
 
         # Convert layouts for serialization
         serializable_layouts = []
-        for l in all_layouts:
-            serializable_layouts.append({
-                'strategy': l['strategy'],
-                'start_idx': l['start_idx'],
-                'x': l['x'].tolist() if hasattr(l['x'], 'tolist') else list(l['x']),
-                'y': l['y'].tolist() if hasattr(l['y'], 'tolist') else list(l['y']),
-                'aep_absent': l['aep_absent'],
-                'aep_present': l['aep_present'],
-                'liberal_regret': l['liberal_regret'],
-                'conservative_regret': l['conservative_regret'],
-            })
+        for lt in all_layouts:
+            serializable_layouts.append(
+                {
+                    "strategy": lt["strategy"],
+                    "start_idx": lt["start_idx"],
+                    "x": lt["x"].tolist()
+                    if hasattr(lt["x"], "tolist")
+                    else list(lt["x"]),
+                    "y": lt["y"].tolist()
+                    if hasattr(lt["y"], "tolist")
+                    else list(lt["y"]),
+                    "aep_absent": lt["aep_absent"],
+                    "aep_present": lt["aep_present"],
+                    "liberal_regret": lt["liberal_regret"],
+                    "conservative_regret": lt["conservative_regret"],
+                }
+            )
 
         return PooledBlobDiscoveryResult(
             control_points=control_points,
@@ -1473,11 +1580,13 @@ class PooledBlobDiscovery:
             global_best_aep_present=global_best_aep_present,
             min_liberal_regret=min_liberal_regret,
             min_conservative_regret=min_conservative_regret,
-            best_liberal_layout=(best_liberal_layout['x'], best_liberal_layout['y']),
-            best_conservative_layout=(best_conservative_layout['x'], best_conservative_layout['y']),
+            best_liberal_layout=(best_liberal_layout["x"], best_liberal_layout["y"]),
+            best_conservative_layout=(
+                best_conservative_layout["x"],
+                best_conservative_layout["y"],
+            ),
             all_layouts=serializable_layouts,
             n_liberal_starts=settings.n_starts,
             n_conservative_starts=settings.n_starts,
             same_best_layout=same_best,
         )
-

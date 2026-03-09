@@ -116,9 +116,7 @@ def compute_soft_wake_effect(
     Returns:
         Weighted wake deficit at target positions (n_cases, n_target).
     """
-    n_target = target_x.shape[0]
     n_neighbor = neighbor_positions.shape[0]
-    n_cases = ws_amb.shape[0]
 
     # Compute deficit from each neighbor to each target
     # This is expensive but necessary for soft weighting
@@ -177,7 +175,6 @@ def compute_aep_with_soft_neighbors(
     """
     n_target = target_x.shape[0]
     neighbor_pos, neighbor_weights = soft_farm.weighted_positions()
-    n_neighbor = neighbor_pos.shape[0]
 
     # Concatenate target and neighbor positions
     x_all = jnp.concatenate([target_x, neighbor_pos[:, 0]])
