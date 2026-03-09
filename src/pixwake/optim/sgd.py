@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, NamedTuple
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -152,42 +152,13 @@ def _compute_mid_bisection(
 # =============================================================================
 
 
-def _signed_distance_to_edge(
-    px: jnp.ndarray,
-    py: jnp.ndarray,
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-) -> jnp.ndarray:
-    """Compute signed distance from points to a line segment edge.
+from pixwake.optim.boundary import (
+    _signed_distance_to_edge_line,
+    containment_penalty as _containment_penalty,
+)
 
-    Positive distance means inside (to the left of edge when traversing CCW).
-    Negative distance means outside.
-
-    Args:
-        px, py: Point coordinates, shape (n_turbines,).
-        x1, y1: Edge start point.
-        x2, y2: Edge end point.
-
-    Returns:
-        Signed distances, shape (n_turbines,).
-    """
-    # Edge vector
-    edge_x = x2 - x1
-    edge_y = y2 - y1
-    edge_len = jnp.sqrt(edge_x**2 + edge_y**2) + 1e-10
-
-    # Unit normal pointing inward (90 deg CCW rotation of edge direction)
-    normal_x = -edge_y / edge_len
-    normal_y = edge_x / edge_len
-
-    # Vector from edge start to point
-    ap_x = px - x1
-    ap_y = py - y1
-
-    # Signed distance = dot(AP, normal)
-    return ap_x * normal_x + ap_y * normal_y
+# Backward-compatible aliases — delegate to boundary.py
+_signed_distance_to_edge = _signed_distance_to_edge_line
 
 
 def boundary_penalty(
@@ -198,12 +169,7 @@ def boundary_penalty(
 ) -> jnp.ndarray:
     """Compute boundary constraint penalty matching TopFarm's formulation.
 
-    For a convex polygon boundary, computes the signed distance from each
-    turbine to each edge. Violated constraints (negative distance) are
-    penalized using squared distance, matching TopFarm's DistanceConstraintAggregation.
-
-    Penalty: sum(distance²) for turbines outside boundary (distance < 0)
-    Gradient: 2 * distance for violated turbines
+    Delegates to :func:`pixwake.optim.boundary.containment_penalty` (convex path).
 
     Args:
         x: Turbine x positions, shape (n_turbines,).
@@ -214,26 +180,7 @@ def boundary_penalty(
     Returns:
         Scalar penalty value (0 if all constraints satisfied).
     """
-    n_vertices = boundary_vertices.shape[0]
-
-    # Compute signed distance to each edge for all turbines
-    def edge_distances(i: Any) -> jnp.ndarray:
-        x1, y1 = boundary_vertices[i]
-        x2, y2 = boundary_vertices[(i + 1) % n_vertices]
-        return _signed_distance_to_edge(x, y, x1, y1, x2, y2)
-
-    # Stack distances: shape (n_edges, n_turbines)
-    all_distances = jax.vmap(edge_distances)(jnp.arange(n_vertices))
-
-    # For convex polygon, turbine is inside if ALL edge distances are positive
-    # The minimum distance determines how "inside" we are
-    min_distances = jnp.min(all_distances, axis=0)  # shape (n_turbines,)
-
-    # TopFarm uses squared distance for boundary violations
-    # Penalty: sum(distance²) where distance < 0
-    # Use softplus for smooth transition at boundary
-    violations = jnp.minimum(0.0, min_distances)  # negative distances only
-    return jnp.sum(violations**2)
+    return _containment_penalty(x, y, boundary_vertices, convex=True)
 
 
 def spacing_penalty(
