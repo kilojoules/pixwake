@@ -69,16 +69,22 @@ from pixwake.optim.sgd import (
     boundary_penalty,
     create_bilevel_optimizer,
     create_layout_optimizer,
+    generate_random_starts,
     sgd_solve_implicit,
+    sgd_solve_implicit_multistart,
     spacing_penalty,
     topfarm_sgd_solve,
+    topfarm_sgd_solve_multistart,
 )
 
 __all__ = [
     "SGDSettings",
     "SGDState",
     "topfarm_sgd_solve",
+    "topfarm_sgd_solve_multistart",
     "sgd_solve_implicit",
+    "sgd_solve_implicit_multistart",
+    "generate_random_starts",
     "create_layout_optimizer",
     "create_bilevel_optimizer",
     "boundary_penalty",

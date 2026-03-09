@@ -23,11 +23,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, NamedTuple
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
-from jax import custom_vjp, vjp
+from jax import custom_vjp
 from jax.lax import while_loop
 
 from pixwake.optim.boundary import (
@@ -60,10 +60,10 @@ class SGDState(NamedTuple):
     v_x: jnp.ndarray
     v_y: jnp.ndarray
     iteration: int
-    learning_rate: float | jnp.ndarray
-    alpha: float | jnp.ndarray
-    alpha0: float | jnp.ndarray
-    lr0: float | jnp.ndarray
+    learning_rate: float
+    alpha: float
+    alpha0: float
+    lr0: float
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,16 @@ class SGDSettings:
         ks_rho: KS aggregation smoothness parameter (default: 100.0).
         spacing_weight: Weight for spacing penalty (default: 1.0).
         boundary_weight: Weight for boundary penalty (default: 1.0).
+        additional_constant_lr_iterations: Number of initial iterations to run
+            at the constant initial learning rate before starting the decay
+            schedule. Matches TopFarm's ``additional_constant_lr_iterations``
+            option. During these steps ADAM moments accumulate but the
+            learning rate and constraint multiplier alpha stay fixed
+            (default: 0).
+        ift_cg_damping: Tikhonov damping for the CG solver in the IFT
+            backward pass (default: 0.01).
+        ift_cg_max_iter: Maximum CG iterations in the IFT backward pass
+            (default: 100).
     """
 
     learning_rate: float = 10.0
@@ -105,6 +115,11 @@ class SGDSettings:
     ks_rho: float = 100.0
     spacing_weight: float = 1.0
     boundary_weight: float = 1.0
+    additional_constant_lr_iterations: int = 0
+    ift_cg_damping: float = 1.0
+    ift_cg_max_iter: int = 100
+    ift_polish_max_iter: int = 20
+    ift_polish_tol: float = 1e-8
 
 
 def _compute_mid_bisection(
@@ -333,12 +348,18 @@ def _sgd_step(
     x_new = x - state.learning_rate * m_hat_x / (jnp.sqrt(v_hat_x) + eps)
     y_new = y - state.learning_rate * m_hat_y / (jnp.sqrt(v_hat_y) + eps)
 
-    # Learning rate decay: lr *= 1 / (1 + mid * iter)
+    # During the constant-LR phase, keep lr and alpha fixed (TopFarm behavior:
+    # iter_count is not incremented, so decay factor is 1/(1+mid*0) = 1).
+    n_const = settings.additional_constant_lr_iterations
     mid = settings.mid if settings.mid is not None else 1.0 / settings.max_iter
-    new_lr = state.learning_rate * 1.0 / (1 + mid * it)
+    decaying = it > n_const
+    decay_it = jnp.where(decaying, it - n_const, 0)
+
+    # Learning rate decay: lr *= 1 / (1 + mid * decay_iter)
+    new_lr = state.learning_rate * 1.0 / (1 + mid * decay_it)
 
     # Alpha update: alpha = alpha0 * lr0 / lr
-    new_alpha = state.alpha0 * state.lr0 / new_lr
+    new_alpha = jnp.where(decaying, state.alpha0 * state.lr0 / new_lr, state.alpha)
 
     new_state = SGDState(
         m_x=m_x,
@@ -404,21 +425,10 @@ def topfarm_sgd_solve(
             lower=settings.bisect_lower,
             upper=settings.bisect_upper,
         )
-        # Create new settings with computed mid
-        settings = SGDSettings(
-            learning_rate=settings.learning_rate,
-            gamma_min_factor=settings.gamma_min_factor,
-            beta1=settings.beta1,
-            beta2=settings.beta2,
-            max_iter=settings.max_iter,
-            tol=settings.tol,
-            mid=computed_mid,
-            bisect_upper=settings.bisect_upper,
-            bisect_lower=settings.bisect_lower,
-            ks_rho=settings.ks_rho,
-            spacing_weight=settings.spacing_weight,
-            boundary_weight=settings.boundary_weight,
-        )
+        # Create new settings with computed mid (preserve all other fields)
+        from dataclasses import replace as _dc_replace
+
+        settings = _dc_replace(settings, mid=computed_mid)
 
     rho = settings.ks_rho
 
@@ -445,14 +455,17 @@ def topfarm_sgd_solve(
     )
 
     # State for while_loop: (x, y, sgd_state, prev_x, prev_y)
+    # Total iterations = additional constant LR steps + max_iter decaying steps
+    total_iter = settings.max_iter + settings.additional_constant_lr_iterations
+
     def cond_fn(
         carry: tuple[jnp.ndarray, jnp.ndarray, SGDState, jnp.ndarray, jnp.ndarray],
     ) -> jnp.ndarray:
         x, y, state, prev_x, prev_y = carry
-        # Continue if not converged and under max iterations
+        # Continue if not converged and under total iterations
         change = jnp.max(jnp.abs(x - prev_x)) + jnp.max(jnp.abs(y - prev_y))
         not_converged = change > settings.tol
-        under_max_iter = state.iteration < settings.max_iter
+        under_max_iter = state.iteration < total_iter
         return jnp.logical_and(not_converged, under_max_iter)
 
     def body_fn(
@@ -476,6 +489,67 @@ def topfarm_sgd_solve(
     final_x, final_y, _, _, _ = while_loop(cond_fn, body_fn, init_carry)
 
     return final_x, final_y
+
+
+# =============================================================================
+# Newton-CG Polishing (drives gradient residual to zero for IFT)
+# =============================================================================
+
+
+def _newton_polish(
+    total_obj_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    x: jnp.ndarray,
+    y: jnp.ndarray,
+    max_iter: int = 20,
+    tol: float = 1e-8,
+    cg_max_iter: int = 50,
+    damping: float = 0.01,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Gradient descent polishing to drive gradient residual toward zero.
+
+    After SGD converges (position change < tol), the gradient residual may
+    still be large (~0.01) due to the decaying learning rate.  Constant-LR
+    gradient descent steps can reduce |grad|, improving the IFT assumption
+    grad L(x*, params) ≈ 0.
+
+    Uses backtracking line search for step size selection.
+    Python-level loop (runs at trace time inside custom_vjp forward pass).
+    """
+    grad_fn = jax.grad(total_obj_fn, argnums=(0, 1))
+    best_norm = float("inf")
+    best_x, best_y = x, y
+
+    for it in range(max_iter):
+        gx, gy = grad_fn(x, y)
+        grad_norm = float(jnp.sqrt(jnp.sum(gx**2) + jnp.sum(gy**2)))
+
+        if grad_norm < best_norm:
+            best_norm = grad_norm
+            best_x, best_y = x, y
+
+        if it == 0 or it % 5 == 0 or grad_norm < tol:
+            print(f"    Polish iter {it}: |grad| = {grad_norm:.6e}", flush=True)
+
+        if grad_norm < tol:
+            break
+
+        # Backtracking line search along -gradient
+        obj_current = float(total_obj_fn(x, y))
+        gnorm_sq = float(jnp.sum(gx**2) + jnp.sum(gy**2))
+        step = 1.0  # start with step=1, halve until Armijo satisfied
+        for _ in range(30):
+            obj_new = float(total_obj_fn(x - step * gx, y - step * gy))
+            if obj_new <= obj_current - 1e-4 * step * gnorm_sq:
+                break
+            step *= 0.5
+        else:
+            break  # line search failed — stop polishing
+
+        x = x - step * gx
+        y = y - step * gy
+
+    print(f"    Polish done: best |grad| = {best_norm:.6e}", flush=True)
+    return best_x, best_y
 
 
 # =============================================================================
@@ -547,11 +621,63 @@ def sgd_solve_implicit(
     if settings is None:
         settings = SGDSettings()
 
-    # Wrap objective to include params
+    opt_x, opt_y = _sgd_and_polish(
+        objective_fn,
+        init_x,
+        init_y,
+        boundary,
+        min_spacing,
+        settings,
+        params,
+    )
+    return opt_x, opt_y
+
+
+def _sgd_and_polish(
+    objective_fn: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    init_x: jnp.ndarray,
+    init_y: jnp.ndarray,
+    boundary: jnp.ndarray,
+    min_spacing: float,
+    settings: SGDSettings,
+    params: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Run SGD then Newton-CG polishing to satisfy IFT optimality condition."""
+    rho = settings.ks_rho
+
     def obj_fn(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
         return objective_fn(x, y, params)
 
-    return topfarm_sgd_solve(obj_fn, init_x, init_y, boundary, min_spacing, settings)
+    opt_x, opt_y = topfarm_sgd_solve(
+        obj_fn,
+        init_x,
+        init_y,
+        boundary,
+        min_spacing,
+        settings,
+    )
+
+    # Newton-CG polishing: drive grad(total_obj) → 0 for IFT
+    if settings.ift_polish_max_iter > 0:
+
+        def total_obj(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+            return (
+                obj_fn(x, y)
+                + settings.boundary_weight * boundary_penalty(x, y, boundary, rho)
+                + settings.spacing_weight * spacing_penalty(x, y, min_spacing, rho)
+            )
+
+        opt_x, opt_y = _newton_polish(
+            total_obj,
+            opt_x,
+            opt_y,
+            max_iter=settings.ift_polish_max_iter,
+            tol=settings.ift_polish_tol,
+            cg_max_iter=settings.ift_cg_max_iter,
+            damping=settings.ift_cg_damping,
+        )
+
+    return opt_x, opt_y
 
 
 def _sgd_solve_implicit_fwd(
@@ -567,16 +693,15 @@ def _sgd_solve_implicit_fwd(
     if settings is None:
         settings = SGDSettings()
 
-    # Wrap objective to include params
-    def obj_fn(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
-        return objective_fn(x, y, params)
-
-    # Call the underlying solver (not the custom_vjp wrapper)
-    opt_x, opt_y = topfarm_sgd_solve(
-        obj_fn, init_x, init_y, boundary, min_spacing, settings
+    opt_x, opt_y = _sgd_and_polish(
+        objective_fn,
+        init_x,
+        init_y,
+        boundary,
+        min_spacing,
+        settings,
+        params,
     )
-    # Store residuals for backward pass (only JAX-compatible types)
-    # settings is passed through nondiff_argnums
     return (opt_x, opt_y), (opt_x, opt_y, params)
 
 
@@ -615,74 +740,129 @@ def _sgd_solve_implicit_bwd(
         pen_s = settings.spacing_weight * spacing_penalty(x, y, min_spacing, rho)
         return obj + pen_b + pen_s
 
-    # Compute VJP of optimality conditions with respect to params
+    # Compute Jacobian of optimality conditions with respect to params
     # Using the implicit function theorem:
     # d(x*,y*)/d(params) = -H^{-1} @ (d^2 L / d(x,y) d(params))
+    #
+    # Uses pure AD via jax.jacfwd(jax.grad(...)) for the cross-Jacobian and
+    # jax.jvp(jax.grad(...)) for Hessian-vector products. This is possible
+    # because both fixed_point_fwd and fixed_point_rev now use
+    # _fixed_point_raw (no custom_vjp), allowing JVP to propagate through
+    # the VJP trace of the wake simulation.
 
-    # First, compute the mixed second derivative (gradient of gradient w.r.t. params)
-    def grad_xy_wrt_params(p: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-        grad_fn = jax.grad(lambda x, y: total_obj(x, y, p), argnums=(0, 1))
-        return grad_fn(opt_x, opt_y)
+    def grad_xy_fn(p: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Compute gradient of total_obj w.r.t. (x, y) at given params."""
+        return jax.grad(lambda x, y: total_obj(x, y, p), argnums=(0, 1))(opt_x, opt_y)
 
-    _, vjp_params_fn = vjp(grad_xy_wrt_params, params)
+    # Cross-Jacobian d(grad_xy)/d(params) via forward-over-reverse AD (jacfwd)
+    # This works because fixed_point_fwd now calls _fixed_point_raw (no custom_vjp),
+    # so JVP can propagate through the VJP trace of the wake simulation.
+    jac = jax.jacfwd(grad_xy_fn)(params)
+    jac_x = jac[0]  # shape (n_turbines, n_params)
+    jac_y = jac[1]  # shape (n_turbines, n_params)
 
-    # Solve the linear system H @ v = g using fixed-point iteration
-    # v = g - (H - I) @ v, which converges for well-conditioned H
-
+    # Hessian-vector product via forward-over-reverse AD (jvp of grad)
     def hvp(vx: jnp.ndarray, vy: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Hessian-vector product."""
+        """Exact Hessian-vector product via jax.jvp(jax.grad(...))."""
 
-        def grad_at_opt(
-            x: jnp.ndarray, y: jnp.ndarray
-        ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        def grad_obj(x: jnp.ndarray, y: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
             return jax.grad(lambda xx, yy: total_obj(xx, yy, params), argnums=(0, 1))(
                 x, y
             )
 
-        # Use forward-over-reverse for Hessian-vector product
-        primals = (opt_x, opt_y)
-        tangents = (vx, vy)
-        _, hvp_result = jax.jvp(grad_at_opt, primals, tangents)
-        return hvp_result
+        _, (hvp_x, hvp_y) = jax.jvp(grad_obj, (opt_x, opt_y), (vx, vy))
+        return hvp_x, hvp_y
 
-    # Solve H @ v = g using conjugate gradient (simplified: fixed-point iteration)
+    # Solve (H + damping*I) @ v = g using truncated Conjugate Gradient (CG)
+    # Tikhonov damping regularizes near-singular Hessians.
+    # Truncated CG: if negative curvature is detected (p^T A p <= 0),
+    # we stop and return the current iterate. This handles indefinite
+    # Hessians that arise when the inner solver hasn't fully converged.
+    damping = settings.ift_cg_damping
+    cg_max_iter = settings.ift_cg_max_iter
+
     def solve_linear_system(
-        g_x: jnp.ndarray, g_y: jnp.ndarray, max_iter: int = 50, tol: float = 1e-6
+        g_x: jnp.ndarray,
+        g_y: jnp.ndarray,
+        max_iter: int = cg_max_iter,
+        tol: float = 1e-6,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Solve H @ v = g approximately using fixed-point iteration."""
+        """Solve (H + damping*I) @ v = g using truncated Conjugate Gradient."""
 
-        def cond_fn(
-            carry: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, int],
+        def damped_hvp(
+            vx: jnp.ndarray, vy: jnp.ndarray
+        ) -> tuple[jnp.ndarray, jnp.ndarray]:
+            hx, hy = hvp(vx, vy)
+            return hx + damping * vx, hy + damping * vy
+
+        def dot_xy(
+            ax: jnp.ndarray, ay: jnp.ndarray, bx: jnp.ndarray, by: jnp.ndarray
         ) -> jnp.ndarray:
-            _, _, r_x, r_y, it = carry
-            residual = jnp.max(jnp.abs(r_x)) + jnp.max(jnp.abs(r_y))
-            return jnp.logical_and(residual > tol, it < max_iter)
+            return jnp.sum(ax * bx) + jnp.sum(ay * by)
 
-        def body_fn(
-            carry: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, int],
-        ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, int]:
-            v_x, v_y, _, _, it = carry
-            hv_x, hv_y = hvp(v_x, v_y)
-            # Damped update: v_new = v + 0.1 * (g - H @ v)
-            r_x = g_x - hv_x
-            r_y = g_y - hv_y
-            v_x_new = v_x + 0.1 * r_x
-            v_y_new = v_y + 0.1 * r_y
-            return (v_x_new, v_y_new, r_x, r_y, it + 1)
+        # CG state: (v_x, v_y, r_x, r_y, p_x, p_y, rs_old, iteration)
+        def cond_fn(carry):
+            _, _, _, _, _, _, rs_old, it = carry
+            # Continue while residual is large, iteration count < max,
+            # and residual is finite (stops on NaN/Inf from divergence)
+            return jnp.logical_and(
+                jnp.logical_and(rs_old > tol**2, it < max_iter),
+                jnp.isfinite(rs_old),
+            )
 
-        # Initial guess: v = g (approximation for H close to identity)
-        init_r_x, init_r_y = hvp(g_x, g_y)
-        init_r_x = g_x - init_r_x
-        init_r_y = g_y - init_r_y
-        init_carry = (g_x, g_y, init_r_x, init_r_y, 0)
-        v_x, v_y, _, _, _ = while_loop(cond_fn, body_fn, init_carry)
+        def body_fn(carry):
+            v_x, v_y, r_x, r_y, p_x, p_y, rs_old, it = carry
+            # A @ p
+            ap_x, ap_y = damped_hvp(p_x, p_y)
+            # p^T A p — must be positive for CG to work
+            pap = dot_xy(p_x, p_y, ap_x, ap_y)
+            # Truncated CG: if pap <= 0 (negative curvature), stop by
+            # setting residual to 0 (triggers cond_fn exit) and keeping
+            # current v unchanged.
+            neg_curv = pap <= 1e-30
+            # When negative curvature detected, use alpha=0 to freeze v
+            alpha = jnp.where(neg_curv, 0.0, rs_old / jnp.maximum(pap, 1e-30))
+            # update solution and residual
+            v_x_new = v_x + alpha * p_x
+            v_y_new = v_y + alpha * p_y
+            r_x_new = r_x - alpha * ap_x
+            r_y_new = r_y - alpha * ap_y
+            rs_new = dot_xy(r_x_new, r_y_new, r_x_new, r_y_new)
+            # Force exit on negative curvature by setting rs_new = 0
+            rs_new = jnp.where(neg_curv, 0.0, rs_new)
+            # update search direction
+            beta = rs_new / jnp.maximum(rs_old, 1e-30)
+            p_x_new = r_x_new + beta * p_x
+            p_y_new = r_y_new + beta * p_y
+            return (
+                v_x_new,
+                v_y_new,
+                r_x_new,
+                r_y_new,
+                p_x_new,
+                p_y_new,
+                rs_new,
+                it + 1,
+            )
+
+        # Initial guess: v = 0, r = g - A@0 = g, p = r
+        v0_x = jnp.zeros_like(g_x)
+        v0_y = jnp.zeros_like(g_y)
+        r0_x, r0_y = g_x, g_y
+        p0_x, p0_y = g_x, g_y
+        rs0 = dot_xy(r0_x, r0_y, r0_x, r0_y)
+        init_carry = (v0_x, v0_y, r0_x, r0_y, p0_x, p0_y, rs0, 0)
+        v_x, v_y, _, _, _, _, _, _ = while_loop(cond_fn, body_fn, init_carry)
         return v_x, v_y
 
     # Solve for the adjoint vector
     adj_x, adj_y = solve_linear_system(g_x, g_y)
 
-    # Compute gradient with respect to params
-    (grad_params,) = vjp_params_fn((adj_x, adj_y))
+    # Compute gradient with respect to params using the Jacobian
+    # grad_params = adj_x^T @ jac_x + adj_y^T @ jac_y
+    grad_params = jnp.sum(adj_x[:, None] * jac_x, axis=0) + jnp.sum(
+        adj_y[:, None] * jac_y, axis=0
+    )
 
     # Gradients with respect to init_x, init_y are zero (fixed point doesn't depend on initial guess)
     return (jnp.zeros_like(opt_x), jnp.zeros_like(opt_y), -grad_params)
@@ -692,12 +872,288 @@ sgd_solve_implicit.defvjp(_sgd_solve_implicit_fwd, _sgd_solve_implicit_bwd)
 
 
 # =============================================================================
+# Multistart Helpers
+# =============================================================================
+
+
+def generate_random_starts(
+    key: jnp.ndarray,
+    k: int,
+    n_turbines: int,
+    boundary: jnp.ndarray,
+    min_spacing: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Generate K random initial turbine layouts within a boundary polygon.
+
+    Uses uniform sampling within the bounding box of the polygon with a
+    margin of min_spacing/2 from the edges.
+
+    Args:
+        key: JAX PRNG key.
+        k: Number of random starts to generate.
+        n_turbines: Number of turbines per layout.
+        boundary: Polygon vertices (CCW), shape (n_vertices, 2).
+        min_spacing: Minimum inter-turbine distance (used for margin).
+
+    Returns:
+        Tuple of (init_x_batch, init_y_batch), each shape (k, n_turbines).
+    """
+    x_min = float(boundary[:, 0].min())
+    x_max = float(boundary[:, 0].max())
+    y_min = float(boundary[:, 1].min())
+    y_max = float(boundary[:, 1].max())
+
+    margin = min_spacing / 2
+    keys = jax.random.split(key, 2 * k)
+
+    xs = []
+    ys = []
+    for i in range(k):
+        x = jax.random.uniform(
+            keys[2 * i],
+            (n_turbines,),
+            minval=x_min + margin,
+            maxval=x_max - margin,
+        )
+        y = jax.random.uniform(
+            keys[2 * i + 1],
+            (n_turbines,),
+            minval=y_min + margin,
+            maxval=y_max - margin,
+        )
+        xs.append(x)
+        ys.append(y)
+
+    return jnp.stack(xs), jnp.stack(ys)
+
+
+# =============================================================================
+# Multistart SGD Solver
+# =============================================================================
+
+
+def topfarm_sgd_solve_multistart(
+    objective_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    init_x_batch: jnp.ndarray,
+    init_y_batch: jnp.ndarray,
+    boundary: jnp.ndarray,
+    min_spacing: float,
+    settings: SGDSettings | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Solve layout optimization with K parallel starts via vmap.
+
+    Runs topfarm_sgd_solve for each of the K initial layouts in parallel.
+    The ``mid`` parameter is precomputed once (pure Python bisection) and
+    passed explicitly so no trace-time computation occurs inside vmap.
+
+    Args:
+        objective_fn: Function (x, y) -> scalar to minimize.
+        init_x_batch: Initial x positions, shape (K, n_turbines).
+        init_y_batch: Initial y positions, shape (K, n_turbines).
+        boundary: Polygon vertices (CCW), shape (n_vertices, 2).
+        min_spacing: Minimum inter-turbine distance.
+        settings: SGD configuration.
+
+    Returns:
+        Tuple of (all_x, all_y, all_objs) where:
+            all_x: shape (K, n_turbines) — optimized x for each start
+            all_y: shape (K, n_turbines) — optimized y for each start
+            all_objs: shape (K,) — objective value at each optimum
+    """
+    if settings is None:
+        settings = SGDSettings()
+
+    # Precompute mid ONCE (pure Python, not traceable)
+    if settings.mid is None:
+        gamma_min = settings.gamma_min_factor
+        computed_mid = _compute_mid_bisection(
+            learning_rate=settings.learning_rate,
+            gamma_min=gamma_min,
+            max_iter=settings.max_iter,
+            lower=settings.bisect_lower,
+            upper=settings.bisect_upper,
+        )
+        from dataclasses import replace as _dc_replace
+
+        settings = _dc_replace(settings, mid=computed_mid)
+
+    def solve_one(
+        init_x: jnp.ndarray, init_y: jnp.ndarray
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        return topfarm_sgd_solve(
+            objective_fn, init_x, init_y, boundary, min_spacing, settings
+        )
+
+    all_x, all_y = jax.vmap(solve_one)(init_x_batch, init_y_batch)
+
+    # Evaluate objective at each optimum
+    all_objs = jax.vmap(objective_fn)(all_x, all_y)
+
+    return all_x, all_y, all_objs
+
+
+# =============================================================================
+# Multistart Implicit Differentiation (Envelope Theorem)
+# =============================================================================
+
+
+@partial(custom_vjp, nondiff_argnums=(0, 4, 5, 6))
+def sgd_solve_implicit_multistart(
+    objective_fn: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    init_x_batch: jnp.ndarray,
+    init_y_batch: jnp.ndarray,
+    params: jnp.ndarray,
+    boundary: jnp.ndarray,
+    min_spacing: float,
+    settings: SGDSettings | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Multistart SGD solver with implicit differentiation (envelope theorem).
+
+    Forward pass: vmaps K inner solves, picks the winner (lowest objective).
+    Backward pass: IFT through the winning start only. The envelope theorem
+    guarantees correctness when the winning start is locally stable:
+        d/dp min_k f_k(p) = d/dp f_{k*}(p)
+
+    Args:
+        objective_fn: Function (x, y, params) -> scalar to minimize.
+        init_x_batch: Initial x positions, shape (K, n_turbines).
+        init_y_batch: Initial y positions, shape (K, n_turbines).
+        params: External parameters to differentiate w.r.t.
+        boundary: Polygon vertices (CCW), shape (n_vertices, 2).
+        min_spacing: Minimum inter-turbine distance.
+        settings: SGD configuration.
+
+    Returns:
+        Tuple of (winner_x, winner_y) — optimized layout from best start.
+    """
+    if settings is None:
+        settings = SGDSettings()
+
+    # Precompute mid
+    if settings.mid is None:
+        gamma_min = settings.gamma_min_factor
+        computed_mid = _compute_mid_bisection(
+            learning_rate=settings.learning_rate,
+            gamma_min=gamma_min,
+            max_iter=settings.max_iter,
+            lower=settings.bisect_lower,
+            upper=settings.bisect_upper,
+        )
+        from dataclasses import replace as _dc_replace
+
+        settings = _dc_replace(settings, mid=computed_mid)
+
+    def obj_fn(x, y):
+        return objective_fn(x, y, params)
+
+    def solve_one(init_x, init_y):
+        return topfarm_sgd_solve(
+            obj_fn, init_x, init_y, boundary, min_spacing, settings
+        )
+
+    all_x, all_y = jax.vmap(solve_one)(init_x_batch, init_y_batch)
+    all_objs = jax.vmap(obj_fn)(all_x, all_y)
+    k_star = jnp.argmin(all_objs)
+
+    return all_x[k_star], all_y[k_star]
+
+
+def _sgd_solve_implicit_multistart_fwd(
+    objective_fn,
+    init_x_batch,
+    init_y_batch,
+    params,
+    boundary,
+    min_spacing,
+    settings,
+):
+    """Forward pass for multistart implicit differentiation."""
+    if settings is None:
+        settings = SGDSettings()
+
+    if settings.mid is None:
+        gamma_min = settings.gamma_min_factor
+        computed_mid = _compute_mid_bisection(
+            learning_rate=settings.learning_rate,
+            gamma_min=gamma_min,
+            max_iter=settings.max_iter,
+            lower=settings.bisect_lower,
+            upper=settings.bisect_upper,
+        )
+        from dataclasses import replace as _dc_replace
+
+        settings = _dc_replace(settings, mid=computed_mid)
+
+    def obj_fn(x, y):
+        return objective_fn(x, y, params)
+
+    def solve_one(init_x, init_y):
+        return topfarm_sgd_solve(
+            obj_fn, init_x, init_y, boundary, min_spacing, settings
+        )
+
+    all_x, all_y = jax.vmap(solve_one)(init_x_batch, init_y_batch)
+    all_objs = jax.vmap(obj_fn)(all_x, all_y)
+    k_star = jnp.argmin(all_objs)
+
+    winner_x, winner_y = all_x[k_star], all_y[k_star]
+    # Store residuals: winner solution + params + batch shape for zero grads
+    return (winner_x, winner_y), (
+        winner_x,
+        winner_y,
+        params,
+        init_x_batch,
+        init_y_batch,
+    )
+
+
+def _sgd_solve_implicit_multistart_bwd(
+    objective_fn,
+    boundary,
+    min_spacing,
+    settings,
+    res,
+    g,
+):
+    """Backward pass: IFT through winning start only (envelope theorem).
+
+    Reuses the exact same IFT backward logic as single-start
+    ``_sgd_solve_implicit_bwd``. The envelope theorem guarantees this is
+    correct: d/dp min_k f_k(p) = d/dp f_{k*}(p).
+    """
+    winner_x, winner_y, params, init_x_batch, init_y_batch = res
+    # Delegate to the single-start backward — same math applies at the winner
+    single_res = (winner_x, winner_y, params)
+    _, _, grad_params = _sgd_solve_implicit_bwd(
+        objective_fn,
+        boundary,
+        min_spacing,
+        settings,
+        single_res,
+        g,
+    )
+    # Gradients w.r.t. init_x_batch and init_y_batch are zero
+    # (fixed point doesn't depend on initial guess)
+    return (
+        jnp.zeros_like(init_x_batch),
+        jnp.zeros_like(init_y_batch),
+        grad_params,
+    )
+
+
+sgd_solve_implicit_multistart.defvjp(
+    _sgd_solve_implicit_multistart_fwd,
+    _sgd_solve_implicit_multistart_bwd,
+)
+
+
+# =============================================================================
 # Convenience Wrapper for Common Use Case
 # =============================================================================
 
 
 def create_layout_optimizer(
-    sim_engine: Any,
+    sim_engine,
     boundary: jnp.ndarray,
     min_spacing: float,
     ws_amb: jnp.ndarray | float,
@@ -751,7 +1207,7 @@ def create_layout_optimizer(
 
 
 def create_bilevel_optimizer(
-    sim_engine: Any,
+    sim_engine,
     target_boundary: jnp.ndarray,
     min_spacing: float,
     ws_amb: jnp.ndarray | float,
