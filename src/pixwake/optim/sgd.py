@@ -23,12 +23,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
 from jax import custom_vjp, vjp
 from jax.lax import while_loop
+
+from pixwake.optim.boundary import (
+    _signed_distance_to_edge_line,
+)
+from pixwake.optim.boundary import (
+    containment_penalty as _containment_penalty,
+)
 
 # =============================================================================
 # SGD State (Optax-style stateless design)
@@ -151,11 +158,6 @@ def _compute_mid_bisection(
 # Constraint Penalty Functions (JAX-native, differentiable)
 # =============================================================================
 
-
-from pixwake.optim.boundary import (
-    _signed_distance_to_edge_line,
-    containment_penalty as _containment_penalty,
-)
 
 # Backward-compatible aliases — delegate to boundary.py
 _signed_distance_to_edge = _signed_distance_to_edge_line

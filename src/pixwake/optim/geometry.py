@@ -12,12 +12,10 @@ configurations that maximize design regret.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from pixwake.jax_utils import ssqrt
 
@@ -110,14 +108,9 @@ def evaluate_closed_bspline(
     Returns:
         Points on the spline, shape (n_points, 2).
     """
-    n = control_points.shape[0]
-
     # For closed spline, wrap control points
     # Add 'degree' points at the end that wrap around
-    wrapped_cp = jnp.concatenate([
-        control_points,
-        control_points[:degree]
-    ], axis=0)
+    wrapped_cp = jnp.concatenate([control_points, control_points[:degree]], axis=0)
 
     # Uniform knot vector for closed spline
     n_wrapped = wrapped_cp.shape[0]
@@ -150,12 +143,11 @@ def _de_boor_vectorized(
     Returns:
         Points on the spline, shape (n_points, 2).
     """
-    n_points = t.shape[0]
     n_control = control_points.shape[0]
 
     # Find knot span for each t value
     # k is the index such that knots[k] <= t < knots[k+1]
-    k = jnp.searchsorted(knots, t, side='right') - 1
+    k = jnp.searchsorted(knots, t, side="right") - 1
     # Clamp to valid range
     k = jnp.clip(k, degree, n_control - 1)
 
@@ -184,11 +176,7 @@ def _de_boor_vectorized(
 
             denom = right_knot - left_knot
             # Avoid division by zero
-            alpha = jnp.where(
-                denom > 1e-10,
-                (t - left_knot) / denom,
-                0.5
-            )
+            alpha = jnp.where(denom > 1e-10, (t - left_knot) / denom, 0.5)
 
             # Update d
             d = d.at[:, j].set(
@@ -225,7 +213,7 @@ def compute_sdf_to_spline(
     # Compute unsigned distance to nearest spline point
     # points: (n_query, 2), spline_pts: (n_samples, 2)
     diff = points[:, None, :] - spline_pts[None, :, :]  # (n_query, n_samples, 2)
-    dist_sq = jnp.sum(diff ** 2, axis=-1)  # (n_query, n_samples)
+    dist_sq = jnp.sum(diff**2, axis=-1)  # (n_query, n_samples)
     unsigned_dist = ssqrt(jnp.min(dist_sq, axis=-1))  # (n_query,)
 
     # Determine sign using winding number (ray casting)
@@ -249,8 +237,6 @@ def _compute_winding_sign(
     Returns:
         Sign array: -1 for inside, +1 for outside, shape (n_points,).
     """
-    n_vertices = polygon.shape[0]
-
     # Get edges: (start, end) pairs
     v1 = polygon
     v2 = jnp.roll(polygon, -1, axis=0)
@@ -387,17 +373,21 @@ def sample_random_blob(
     keys = jax.random.split(key, 5)
 
     # Sample center
-    cx = jax.random.uniform(keys[0], minval=center_bounds[0][0], maxval=center_bounds[0][1])
-    cy = jax.random.uniform(keys[1], minval=center_bounds[1][0], maxval=center_bounds[1][1])
+    cx = jax.random.uniform(
+        keys[0], minval=center_bounds[0][0], maxval=center_bounds[0][1]
+    )
+    cy = jax.random.uniform(
+        keys[1], minval=center_bounds[1][0], maxval=center_bounds[1][1]
+    )
 
     # Sample size
-    semi_major = jax.random.uniform(keys[2], minval=size_bounds[0], maxval=size_bounds[1])
+    semi_major = jax.random.uniform(
+        keys[2], minval=size_bounds[0], maxval=size_bounds[1]
+    )
 
     # Sample aspect ratio
     aspect = jax.random.uniform(
-        keys[3],
-        minval=aspect_ratio_bounds[0],
-        maxval=aspect_ratio_bounds[1]
+        keys[3], minval=aspect_ratio_bounds[0], maxval=aspect_ratio_bounds[1]
     )
     semi_minor = semi_major * aspect
 

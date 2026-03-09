@@ -1397,7 +1397,9 @@ def fixed_point_rev(
     first_leaf = x_star[0] if isinstance(x_star, tuple) else x_star
     max_iter = max(20, jnp.atleast_1d(first_leaf).size)
     a_bar_sum = vjp_a(
-        _fixed_point_raw(_inner_f, x_star_bar, None, tol=tol, damp=damp, max_iter=max_iter)
+        _fixed_point_raw(
+            _inner_f, x_star_bar, None, tol=tol, damp=damp, max_iter=max_iter
+        )
     )[0]
 
     # The gradient with respect to `x_guess` is zero, as the fixed point
