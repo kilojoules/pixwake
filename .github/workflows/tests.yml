@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  pull_request:
+  pull_request_target:
     branches:
       - main
 
@@ -29,6 +29,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+            ref: ${{ github.event.pull_request.head.sha }}
             lfs: true
 
       - name: Setup Pixi
